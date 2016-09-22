@@ -416,6 +416,7 @@ static u32 FlowAdd(FlowHash_t* Flow, u32 PktLength, u64 TS)
 		{
 			F = &s_FlowList[ s_FlowListPos++ ];
 			assert(s_FlowListPos < s_FlowListMax);
+			// if(s_FlowListPos > s_FlowListMax) return 0;
 
 			memcpy(F, Flow, sizeof(FlowHash_t));
 			F->Next = s_FlowIndex[Index];
@@ -832,7 +833,7 @@ int main(int argc, char* argv[])
 	memset(s_FlowIndex, 0, sizeof(u32)*(1ULL<<24));
 	g_TotalMemory 		+= sizeof(u32)*(1ULL<<24);
 
-	s_FlowListMax 		= 100e3;
+	s_FlowListMax 		= 100e4;
 	s_FlowList 			= (FlowHash_t*)malloc( sizeof(FlowHash_t) * s_FlowListMax );
 	memset(s_FlowList, 0, sizeof(FlowHash_t) * s_FlowListMax );
 	assert(s_FlowList != NULL);
