@@ -42,6 +42,7 @@ typedef struct
 	u64		TimeScale;		// 1000ns for usec pcap, 1ns for nano pcap
 	u64		ReadPos;		// current read pointer
 	u64		PktCnt;			// number of packets processed
+	u64		BytesCnt;
 
 	u8*		PacketBuffer;	// temp read buffer
 	bool	Finished;		// read completed
@@ -61,6 +62,9 @@ typedef struct
 
 	u64		PktCnt;				// number of packets in this flow
 	u64		Bytes;				// number of bytes in this flow
+
+	u64		StartTime;
+	u64		EndTime;
 
 	u32		Next;				// next flow has index for this hash
 
@@ -103,6 +107,13 @@ u64				g_TotalMemory			= 0;					// total memory consumption
 u64				g_TotalMemoryTCP		= 0;					// total memory of keeping out of order tcp packets
 bool			g_Verbose				= false;				// verbose print mode
 
+
+//shadowgrid
+u64 TotalUDPFlows 		= 0;
+u64 TotalTCPFlows 		= 0;
+u64 TotalFlows 			= 0;
+PCAPPacket_t* firstPkt = NULL;
+PCAPPacket_t* lastPkt = NULL;
 //---------------------------------------------------------------------------------------------
 // first level index
 
@@ -147,7 +158,7 @@ static u32					s_ExtractPortMax		= 0;		// max port range
 static bool					s_EnableFlowDisplay 	= true;		// print full flow information
 bool						g_EnableTCPHeader 		= false;	// output packet header in tcp stream
 
-static bool					s_EnableFlowLog			= true;		// write flow log in realtime
+static bool					s_EnableFlowLog			= false;		// write flow log in realtime
 static FILE*				s_FlowLogFile			= NULL;		// file handle where to write flows
 
 //---------------------------------------------------------------------------------------------
@@ -223,17 +234,18 @@ static PCAPPacket_t* ReadPCAP(PCAPFile_t* PCAP)
 	if (PCAP->ReadPos + sizeof(PCAPPacket_t) + Pkt->LengthCapture > PCAP->Length) return NULL;
 
 	ret = fread(Pkt+1, 1, Pkt->LengthCapture, PCAP->F);
-	if (ret != Pkt->LengthCapture) return NULL;
+	if (ret != Pkt->LengthCapture){ return NULL; }
 
 	PCAP->ReadPos += Pkt->LengthCapture;
 	return Pkt;
 }
 
+
 //---------------------------------------------------------------------------------------------
 // helpers for network formating
 static u64 PCAPTimeStamp(PCAPPacket_t* Pkt)
 {
-	return s_TimeZoneOffset + Pkt->Sec * k1E9 + Pkt->NSec;
+	return  Pkt->Sec * k1E9 + Pkt->NSec - s_TimeZoneOffset;
 }
 static fEther_t * PCAPETHHeader(PCAPPacket_t* Pkt)
 {
@@ -331,6 +343,11 @@ static void PrintFlowTCP(FILE* Out, FlowHash_t* F, u32 FlowID, u32 FlowCnt)
 	fprintf(Out, " %'16lld Pkts ", F->PktCnt);
 	fprintf(Out, " %'16lli Bytes ", F->Bytes);
 
+	fprintf(Out, " | ");
+	fprintf(Out, " %llu ", F->StartTime);
+	fprintf(Out, " | ");
+	fprintf(Out, " %llu ", F->EndTime);
+
 	fprintf(Out, "\n");
 }
 
@@ -356,6 +373,11 @@ static void PrintFlowUDP(FILE* Out, FlowHash_t* F, u32 FlowID, u32 FlowCnt)
 	fprintf(Out, " %'16lld Pkts ", F->PktCnt);
 	fprintf(Out, " %'16lli Bytes ", F->Bytes);
 
+	fprintf(Out, " | ");
+	fprintf(Out, " %llu ", F->StartTime);
+	fprintf(Out, " | ");
+	fprintf(Out, " %llu ", F->EndTime);
+
 	fprintf(Out, "\n");
 }
 
@@ -375,7 +397,7 @@ static u32 FlowHash(u32 Type, u8* Payload, u32 Length)
 
 //---------------------------------------------------------------------------------------------
 
-static u32 FlowAdd(FlowHash_t* Flow, u32 PktLength, u64 TS)
+static u32 FlowAdd(FlowHash_t* Flow, u32 PktLength, u64 TS, u64 Sec)
 {
 	if (s_FlowListPos >= s_FlowExtractMax) return 0;
 
@@ -443,15 +465,26 @@ static u32 FlowAdd(FlowHash_t* Flow, u32 PktLength, u64 TS)
 	F->PktCnt++;
 	F->Bytes += PktLength;
 
+	if(IsFlowNew){
+		TotalFlows++;
+		switch (F->Type)
+		{
+		case FLOW_TYPE_TCP: TotalTCPFlows++ ; break;
+		case FLOW_TYPE_UDP: TotalUDPFlows++; break;
+		}
+		F->StartTime = Sec;
+	}
+
+	F->EndTime = Sec;
 
 	// update flow log
 	if (IsFlowNew && s_EnableFlowLog)
-	{
+	{		
 		u32 ID = F - s_FlowList;
 		switch (F->Type)
 		{
-		case FLOW_TYPE_TCP: PrintFlowTCP(s_FlowLogFile, F, ID, s_FlowListPos); break;
-		case FLOW_TYPE_UDP: PrintFlowUDP(s_FlowLogFile, F, ID, s_FlowListPos); break;
+		case FLOW_TYPE_TCP: PrintFlowTCP(s_FlowLogFile, F, ID, s_FlowListPos);  break;
+		case FLOW_TYPE_UDP: PrintFlowUDP(s_FlowLogFile, F, ID, s_FlowListPos);  break;
 		}
 	}
 	return F - s_FlowList;
@@ -530,6 +563,8 @@ static void print_usage(void)
 }
 
 //---------------------------------------------------------------------------------------------
+
+
 
 int main(int argc, char* argv[])
 {
@@ -833,7 +868,7 @@ int main(int argc, char* argv[])
 	memset(s_FlowIndex, 0, sizeof(u32)*(1ULL<<24));
 	g_TotalMemory 		+= sizeof(u32)*(1ULL<<24);
 
-	s_FlowListMax 		= 100e4;
+	s_FlowListMax 		= 100e5;
 	s_FlowList 			= (FlowHash_t*)malloc( sizeof(FlowHash_t) * s_FlowListMax );
 	memset(s_FlowList, 0, sizeof(FlowHash_t) * s_FlowListMax );
 	assert(s_FlowList != NULL);
@@ -855,17 +890,23 @@ int main(int argc, char* argv[])
 	// clear tcp output
 
 	memset(s_ExtractTCP, 0, sizeof(s_ExtractTCP));
-	printf("[%30s] FileSize: %lliGB\n", PCAPFile->Path, PCAPFile->Length / kGB(1));
+	printf("[%30s] FileSize: %lliMB\n", PCAPFile->Path, PCAPFile->Length /1024/1024);
 
 	u64 TotalByte 		= 0;
 	u64 TotalPkt 		= 0;
 	u64 NextPrintTSC 	= 0;
 	u64 StartTSC		= rdtsc();
 	u64 OutputByte		= 0;
+
 	while (true)
 	{
 		PCAPPacket_t* Pkt = ReadPCAP(PCAPFile);
 		if (!Pkt) break;
+		if (!firstPkt){
+			firstPkt = malloc(sizeof(PCAPPacket_t));	
+			memcpy(firstPkt,Pkt,sizeof(Pkt));
+		} 
+		lastPkt = Pkt;
 
 		PCAPFile->TS = PCAPTimeStamp(Pkt);
 
@@ -933,7 +974,7 @@ int main(int argc, char* argv[])
 		u32 FlowID = 0;
 		if (HashLength > 0)
 		{
-			FlowID = FlowAdd(&Flow, Pkt->Length, PCAPFile->TS);
+			FlowID = FlowAdd(&Flow, Pkt->Length, PCAPFile->TS, Pkt->Sec);
 		}
 
 		if ((FlowID != 0) && s_FlowExtract[ FlowID ])
@@ -1159,6 +1200,7 @@ int main(int argc, char* argv[])
 
 		}
 
+
 		TotalPkt++;
 		TotalByte += sizeof(PCAPPacket_t) + Pkt->LengthCapture;
 
@@ -1198,13 +1240,25 @@ int main(int argc, char* argv[])
 			fflush(stderr);
 			if (TotalPkt > s_MaxPackets) break;
 		}
-	}
-	fprintf(stderr, "parse done\n");
+	}	
 
 	if (OutPCAP) fclose(OutPCAP);
 	fTCPStream_Close(TCPStream);
 
 	if (s_EnableFlowDisplay) PrintHumanFlows();
+	u64 duration= (PCAPTimeStamp(lastPkt) - PCAPTimeStamp(firstPkt)) ;
+
+
+   
+	fflush(stdout);
+	fprintf(stdout, "== Summary ==\n");
+	fprintf(stdout, "totalFlows: %lu\nudpFlows: %lu\ntcpFlows: %lu\n",TotalFlows,TotalUDPFlows,TotalTCPFlows);
+	fprintf(stdout, "totalBits: %lu\ntotalBytes: %lu\ntotalPkts: %lu\n",TotalByte*8, TotalByte, TotalPkt);
+	fprintf(stdout, "filesize: %lu\n",PCAPFile->Length);	
+	fprintf(stdout, "firstPacket: %llu\n",firstPkt->Sec);
+	fprintf(stdout, "lastPacket:  %llu\n",lastPkt->Sec);
+	fprintf(stdout, "duration: %lu NSec ( %s )\n",duration,FormatTS(duration));		
+	fflush(stdout);
 }
 
 /* vim: set ts=4 sts=4 */
